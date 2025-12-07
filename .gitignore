@@ -3,4 +3,8 @@ __pycache__/
 *.pyc
 .DS_Store
 
+# Embedded git repositories
+SnapKV/
+streaming-llm/
+
 
