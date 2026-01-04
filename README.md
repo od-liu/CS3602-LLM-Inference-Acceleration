@@ -36,16 +36,17 @@ Cache 结构: [initial tokens (0:start_size)] + [recent tokens (seq_len-recent_s
 .
 ├── README.md                    # 项目说明文档
 ├── LICENSE                      # 许可证
+├── results.txt                  # 实验结果日志
 │
-├── docs/                        # 文档
+├── docs/                        # 📚 文档
 │   ├── lab-instruction.md       # 作业要求
 │   ├── KnormPress.pdf           # KnormPress 论文
 │   └── L2_COMPRESS_ANALYSIS.md  # 压缩效果分析
 │
-├── data/                        # 数据集
+├── data/                        # 📊 数据集
 │   └── pg19.parquet             # PG-19 长文本数据集
 │
-├── kvcompress/                  # 核心压缩库 ⭐
+├── kvcompress/                  # 🧠 核心压缩库 ⭐
 │   ├── __init__.py              # 统一导出
 │   ├── methods/                 # 压缩方法
 │   │   ├── __init__.py          # 方法注册表
@@ -57,13 +58,18 @@ Cache 结构: [initial tokens (0:start_size)] + [recent tokens (seq_len-recent_s
 │   ├── benchmark.py             # 统一基准测试模块
 │   └── utils.py                 # 工具函数
 │
-├── scripts/                     # 工具脚本
+├── scripts/                     # 🛠️ 工具脚本
 │   ├── benchmark.py             # 统一基准测试入口 ⭐
 │   └── plot_compression_results.py  # 可视化绘图
 │
 ├── baseline_test.py             # 基线性能测试
 │
-├── results/                     # 结果图表
+└── results/                     # 📈 结果图表
+    ├── strategy_comparison.png      # 策略对比图
+    ├── keep_ratio_analysis.png      # Keep Ratio 分析图
+    ├── ppl_accuracy_tradeoff.png    # PPL-Accuracy 权衡图
+    ├── improvement_summary.png      # 改进总结图
+    └── compression_comparison.png   # 压缩效果对比图
 ```
 
 ## 环境配置
