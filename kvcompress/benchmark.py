@@ -1,5 +1,5 @@
 """
-Benchmark Module for KnormPress
+Unified Benchmark Module for KV Cache Compression
 
 This module provides functions to measure generation performance metrics:
 - TTFT (Time To First Token)
@@ -7,14 +7,16 @@ This module provides functions to measure generation performance metrics:
 - Throughput (tokens/sec)
 - PPL (Perplexity)
 - Accuracy (Next token prediction accuracy)
+
+All functions support any compression method through the compress_fn parameter.
 """
 
 import time
-from typing import Dict, List, Optional, Union
+from typing import Callable, Dict, List, Optional, Union
 import torch
 from transformers import DynamicCache
 
-from .compress import l2_compress, to_dynamic_cache
+from .utils import to_dynamic_cache, normalize_kv_cache
 from .evaluate import evaluate_with_compression
 
 
@@ -22,12 +24,12 @@ def measure_generation_metrics(
     model,
     tokenizer,
     text: str,
+    compress_fn: Optional[Callable] = None,
+    compress_kwargs: Optional[Dict] = None,
     max_new_tokens: int = 1000,
-    keep_ratio: float = 1.0,
-    prune_after: int = 1024,  # Much smaller for generation metrics
+    max_input_tokens: int = 3000,
     skip_layers: List[int] = [0, 1],
     device: Optional[torch.device] = None,
-    max_input_tokens: int = 3000,
 ) -> Dict[str, float]:
     """
     Measure generation performance metrics with KV cache compression.
@@ -36,12 +38,12 @@ def measure_generation_metrics(
         model: The language model
         tokenizer: The tokenizer
         text: Input text (prompt)
+        compress_fn: Compression function (None for no compression)
+        compress_kwargs: Additional kwargs for compress_fn
         max_new_tokens: Number of tokens to generate
-        keep_ratio: Fraction of tokens to keep (0.0 to 1.0)
-        prune_after: Only compress if cache length > this value
+        max_input_tokens: Maximum input tokens (to prevent OOM)
         skip_layers: Layer indices to skip compression
         device: Device to use
-        max_input_tokens: Maximum input tokens (to prevent OOM)
     
     Returns:
         Dict containing:
@@ -54,6 +56,9 @@ def measure_generation_metrics(
     """
     if device is None:
         device = next(model.parameters()).device
+    
+    if compress_kwargs is None:
+        compress_kwargs = {}
     
     # Tokenize input (truncate to prevent OOM)
     input_ids = tokenizer.encode(text, return_tensors="pt")
@@ -90,18 +95,9 @@ def measure_generation_metrics(
         
         # Get and compress KV cache
         past_key_values = outputs.past_key_values
-        if keep_ratio < 1.0 and past_key_values is not None:
-            if hasattr(past_key_values, 'to_legacy_cache'):
-                kv_list = past_key_values.to_legacy_cache()
-            else:
-                kv_list = list(past_key_values)
-            
-            compressed_kv = l2_compress(
-                kv_list,
-                keep_ratio=keep_ratio,
-                prune_after=prune_after,
-                skip_layers=skip_layers,
-            )
+        if compress_fn is not None and past_key_values is not None:
+            kv_list = list(normalize_kv_cache(past_key_values))
+            compressed_kv = compress_fn(kv_list, skip_layers=skip_layers, **compress_kwargs)
             past_key_values = to_dynamic_cache(compressed_kv)
         
         # Generate remaining tokens
@@ -124,18 +120,9 @@ def measure_generation_metrics(
             
             # Get and compress KV cache
             past_key_values = outputs.past_key_values
-            if keep_ratio < 1.0 and past_key_values is not None:
-                if hasattr(past_key_values, 'to_legacy_cache'):
-                    kv_list = past_key_values.to_legacy_cache()
-                else:
-                    kv_list = list(past_key_values)
-                
-                compressed_kv = l2_compress(
-                    kv_list,
-                    keep_ratio=keep_ratio,
-                    prune_after=prune_after,
-                    skip_layers=skip_layers,
-                )
+            if compress_fn is not None and past_key_values is not None:
+                kv_list = list(normalize_kv_cache(past_key_values))
+                compressed_kv = compress_fn(kv_list, skip_layers=skip_layers, **compress_kwargs)
                 past_key_values = to_dynamic_cache(compressed_kv)
     
     total_time = time.perf_counter() - total_start
@@ -159,73 +146,64 @@ def benchmark(
     model,
     tokenizer,
     text: str,
+    compress_fn: Optional[Callable] = None,
+    compress_kwargs: Optional[Dict] = None,
     max_new_tokens: int = 1000,
-    keep_ratio: float = 1.0,
-    prune_after: int = 1024,  # Start compressing early
-    skip_layers: List[int] = [0, 1],
     eval_tokens: int = 3000,
+    skip_layers: List[int] = [0, 1],
     device: Optional[torch.device] = None,
 ) -> Dict[str, float]:
     """
-    Run full benchmark including generation metrics and quality metrics.
+    Run full benchmark including timing metrics and quality metrics.
+    
+    NOTE: TTFT/TPOT are now measured across ALL eval_tokens (not just max_new_tokens).
+    This provides more accurate timing for long sequence scenarios.
     
     Args:
         model: The language model
         tokenizer: The tokenizer
         text: Input text
-        max_new_tokens: Number of tokens to generate for speed benchmark
-        keep_ratio: Fraction of tokens to keep (0.0 to 1.0)
-        prune_after: Only compress if cache length > this value
+        compress_fn: Compression function (None for no compression)
+        compress_kwargs: Additional kwargs for compress_fn
+        max_new_tokens: (Deprecated, kept for compatibility) Number of tokens for old generation benchmark
+        eval_tokens: Number of tokens for evaluation (TTFT/TPOT now measured here!)
         skip_layers: Layer indices to skip compression
-        eval_tokens: Number of tokens for PPL/Accuracy evaluation
         device: Device to use
     
     Returns:
         Dict containing all metrics:
-        - ttft, tpot, throughput, total_time, num_tokens, input_length
+        - ttft, tpot, throughput, total_time (measured across eval_tokens)
         - perplexity, accuracy, eval_tokens, final_cache_size
     """
-    # Measure generation metrics
-    gen_metrics = measure_generation_metrics(
-        model=model,
-        tokenizer=tokenizer,
-        text=text,
-        max_new_tokens=max_new_tokens,
-        keep_ratio=keep_ratio,
-        prune_after=prune_after,
-        skip_layers=skip_layers,
-        device=device,
-    )
+    if compress_kwargs is None:
+        compress_kwargs = {}
     
-    # Measure quality metrics (PPL and Accuracy)
-    qual_metrics = evaluate_with_compression(
+    # Measure ALL metrics in a single pass through eval_tokens
+    # This includes both quality metrics (PPL, Accuracy) and timing metrics (TTFT, TPOT)
+    metrics = evaluate_with_compression(
         model=model,
         tokenizer=tokenizer,
         text=text,
-        keep_ratio=keep_ratio,
-        prune_after=prune_after,
-        skip_layers=skip_layers,
+        compress_fn=compress_fn,
+        compress_kwargs=compress_kwargs,
         max_tokens=eval_tokens,
+        skip_layers=skip_layers,
         device=device,
         show_progress=True,
     )
     
-    # Combine metrics
+    # Return all metrics (timing now comes from the full evaluation)
     result = {
-        "keep_ratio": keep_ratio,
-        "compression_pct": int((1 - keep_ratio) * 100),
-        # Generation metrics
-        "ttft": gen_metrics["ttft"],
-        "tpot": gen_metrics["tpot"],
-        "throughput": gen_metrics["throughput"],
-        "total_time": gen_metrics["total_time"],
-        "num_generated": gen_metrics["num_tokens"],
-        "input_length": gen_metrics["input_length"],
+        # Timing metrics (measured across ALL eval_tokens)
+        "ttft": metrics["ttft"],
+        "tpot": metrics["tpot"],
+        "throughput": metrics["throughput"],
+        "total_time": metrics["total_time"],
         # Quality metrics
-        "perplexity": qual_metrics["perplexity"],
-        "accuracy": qual_metrics["accuracy"],
-        "eval_tokens": qual_metrics["num_tokens"],
-        "final_cache_size": qual_metrics["final_cache_size"],
+        "perplexity": metrics["perplexity"],
+        "accuracy": metrics["accuracy"],
+        "eval_tokens": metrics["num_tokens"],
+        "final_cache_size": metrics["final_cache_size"],
     }
     
     return result
@@ -235,57 +213,74 @@ def run_benchmark_suite(
     model,
     tokenizer,
     text: str,
-    keep_ratios: List[float] = [1.0, 0.9, 0.8, 0.7, 0.5, 0.3, 0.1],
+    methods_config: List[Dict],
     max_new_tokens: int = 1000,
-    prune_after: int = 1024,  # Start compressing early
-    skip_layers: List[int] = [0, 1],
     eval_tokens: int = 3000,
+    skip_layers: List[int] = [0, 1],
     device: Optional[torch.device] = None,
 ) -> List[Dict[str, float]]:
     """
-    Run complete benchmark suite across multiple compression levels.
+    Run complete benchmark suite across multiple compression methods.
     
     Args:
         model: The language model
         tokenizer: The tokenizer
         text: Input text
-        keep_ratios: List of keep_ratio values to test
+        methods_config: List of dicts, each containing:
+                       - "name": Method name for display
+                       - "compress_fn": Compression function (None for baseline)
+                       - "kwargs": Dict of compression parameters
         max_new_tokens: Number of tokens to generate
-        prune_after: Only compress if cache length > this value
-        skip_layers: Layer indices to skip compression
         eval_tokens: Number of tokens for PPL evaluation
+        skip_layers: Layer indices to skip compression
         device: Device to use
     
     Returns:
-        List of result dicts, one per keep_ratio
+        List of result dicts, one per method configuration
+    
+    Example:
+        >>> from kvcompress.methods import l2_compress, streaming_llm_compress
+        >>> methods = [
+        ...     {"name": "baseline", "compress_fn": None, "kwargs": {}},
+        ...     {"name": "l2_0.8", "compress_fn": l2_compress, "kwargs": {"keep_ratio": 0.8}},
+        ...     {"name": "streaming_512", "compress_fn": streaming_llm_compress, 
+        ...      "kwargs": {"start_size": 4, "recent_size": 508}},
+        ... ]
+        >>> results = run_benchmark_suite(model, tokenizer, text, methods)
     """
     results = []
     
-    for keep_ratio in keep_ratios:
-        compression_pct = int((1 - keep_ratio) * 100)
+    for config in methods_config:
+        name = config.get("name", "unknown")
+        compress_fn = config.get("compress_fn", None)
+        kwargs = config.get("kwargs", {})
+        
         print(f"\n{'='*60}")
-        print(f"Testing keep_ratio={keep_ratio:.1f} ({compression_pct}% compression)")
+        print(f"Testing: {name}")
         print('='*60)
         
         result = benchmark(
             model=model,
             tokenizer=tokenizer,
             text=text,
+            compress_fn=compress_fn,
+            compress_kwargs=kwargs,
             max_new_tokens=max_new_tokens,
-            keep_ratio=keep_ratio,
-            prune_after=prune_after,
-            skip_layers=skip_layers,
             eval_tokens=eval_tokens,
+            skip_layers=skip_layers,
             device=device,
         )
         
+        result['method'] = name
+        result['config'] = kwargs
         results.append(result)
         
         # Print results
-        print(f"\nGeneration Metrics:")
+        print(f"\nTiming Metrics (across {result['eval_tokens']} tokens):")
         print(f"  TTFT:       {result['ttft']:.4f} seconds")
         print(f"  TPOT:       {result['tpot']:.4f} seconds")
         print(f"  Throughput: {result['throughput']:.2f} tokens/sec")
+        print(f"  Total time: {result['total_time']:.2f} seconds")
         
         print(f"\nQuality Metrics:")
         print(f"  PPL:        {result['perplexity']:.2f}")
@@ -302,48 +297,64 @@ def print_benchmark_summary(results: List[Dict[str, float]]) -> None:
     Args:
         results: List of result dicts from run_benchmark_suite
     """
-    print("\n" + "="*80)
+    print("\n" + "="*90)
     print("BENCHMARK SUMMARY")
-    print("="*80)
+    print("="*90)
     
     # Header
-    print(f"{'Keep':>6} {'Comp%':>6} {'TTFT(s)':>10} {'TPOT(s)':>10} "
+    print(f"{'Method':<20} {'TTFT(s)':>10} {'TPOT(s)':>10} "
           f"{'Thruput':>10} {'PPL':>10} {'Acc':>10} {'Cache':>8}")
-    print("-"*80)
+    print("-"*90)
     
-    # Baseline values for comparison
-    baseline = results[0] if results else None
+    # Find baseline for comparison
+    baseline = None
+    for r in results:
+        if r.get('method') == 'baseline' or r.get('compress_fn') is None:
+            baseline = r
+            break
+    
+    if baseline is None and results:
+        baseline = results[0]
     
     for r in results:
-        # Calculate improvements
-        ttft_imp = ""
-        if baseline and baseline['ttft'] > 0 and r['keep_ratio'] < 1.0:
-            imp = (1 - r['ttft'] / baseline['ttft']) * 100
-            ttft_imp = f"({imp:+.0f}%)"
+        method_name = r.get('method', 'unknown')[:20]
         
-        ppl_change = ""
-        if baseline and baseline['perplexity'] > 0 and r['keep_ratio'] < 1.0:
-            change = (r['perplexity'] / baseline['perplexity'] - 1) * 100
-            ppl_change = f"({change:+.0f}%)"
-        
-        print(f"{r['keep_ratio']:>6.1f} {r['compression_pct']:>6}% "
+        print(f"{method_name:<20} "
               f"{r['ttft']:>10.4f} {r['tpot']:>10.4f} "
               f"{r['throughput']:>10.2f} "
               f"{r['perplexity']:>10.2f} {r['accuracy']:>10.2%} "
               f"{r['final_cache_size']:>8}")
     
-    print("="*80)
+    print("="*90)
     
     # Print comparison with baseline
     if baseline and len(results) > 1:
-        print("\nComparison with baseline (keep_ratio=1.0):")
-        for r in results[1:]:
-            ttft_imp = (1 - r['ttft'] / baseline['ttft']) * 100
-            ppl_change = (r['perplexity'] / baseline['perplexity'] - 1) * 100
-            acc_change = (r['accuracy'] / baseline['accuracy'] - 1) * 100
+        print("\nComparison with baseline (Throughput ↑ better, TPOT ↓ better, PPL ↓ better):")
+        for r in results:
+            if r.get('method') == baseline.get('method'):
+                continue
             
-            print(f"  keep_ratio={r['keep_ratio']:.1f}: "
-                  f"TTFT {ttft_imp:+.1f}%, "
+            # Throughput improvement (higher is better, positive means improvement)
+            throughput_imp = (r['throughput'] / baseline['throughput'] - 1) * 100 if baseline['throughput'] > 0 else 0
+            # TPOT improvement (lower is better, so we invert: positive means faster)
+            tpot_imp = (1 - r['tpot'] / baseline['tpot']) * 100 if baseline['tpot'] > 0 else 0
+            # PPL change (lower is better, so negative is improvement)
+            ppl_change = (r['perplexity'] / baseline['perplexity'] - 1) * 100 if baseline['perplexity'] > 0 else 0
+            # Accuracy change (higher is better, positive is improvement)
+            acc_change = (r['accuracy'] / baseline['accuracy'] - 1) * 100 if baseline['accuracy'] > 0 else 0
+            
+            method_name = r.get('method', 'unknown')
+            print(f"  {method_name}: "
+                  f"Throughput {throughput_imp:+.1f}%, "
+                  f"TPOT {tpot_imp:+.1f}%, "
                   f"PPL {ppl_change:+.1f}%, "
                   f"Acc {acc_change:+.1f}%")
+
+
+__all__ = [
+    'measure_generation_metrics',
+    'benchmark',
+    'run_benchmark_suite',
+    'print_benchmark_summary',
+]
 
