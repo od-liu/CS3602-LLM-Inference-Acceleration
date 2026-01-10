@@ -7,6 +7,11 @@ CS3602大作业：针对大型语言模型的KV Cache优化与推理加速。
 1. **L2 Compress (KnormPress)** - 基于 L2 范数的比例压缩
 2. **Fix-Size L2** - 固定大小 KV Cache 压缩
 3. **StreamingLLM** - 基于 Attention Sink 的流式压缩
+4. **H2O-L2** - H2O 风格的 Heavy-Hitter 压缩（使用 L2 范数近似）
+5. **SnapKV-Lite** - 基于观察窗口投票的压缩
+6. **Pyramid KV** - 层级自适应压缩
+7. **Adaptive L2** - 动态序列长度感知压缩
+8. **Recent-Only** - 纯滑动窗口（对照组）
 
 ## 项目概述
 
@@ -17,6 +22,11 @@ KVCompress 是一个统一的 KV Cache 压缩库，支持多种压缩策略：
 | `l2_compress` | 按 `keep_ratio` 比例压缩，保留低 L2 范数 token | 通用压缩 |
 | `fix_size_l2_compress` | 维持固定 KV Cache 大小，支持多种驱逐策略 | 内存受限场景 |
 | `streaming_llm_compress` | 保留 attention sinks + 最近 tokens | 无限长度流式输入 |
+| `h2o_l2_compress` | Attention sinks + Heavy Hitters (L2) + Recent | 平衡质量与速度 |
+| `snapkv_lite_compress` | 观察窗口投票 + 重要性选择 | 上下文感知压缩 |
+| `pyramid_kv_compress` | 层级自适应压缩（低层多，高层少） | 层级优化 |
+| `adaptive_l2_compress` | 根据序列长度动态调整压缩率 | 变长输入场景 |
+| `recent_only_compress` | 纯滑动窗口，保留最近 N 个 tokens | 对照组基线 |
 
 ### StreamingLLM 方法
 
@@ -53,23 +63,28 @@ Cache 结构: [initial tokens (0:start_size)] + [recent tokens (seq_len-recent_s
 │   │   ├── base.py              # 基类和接口
 │   │   ├── l2_compress.py       # KnormPress L2 压缩
 │   │   ├── fix_size_l2.py       # 固定大小 L2 压缩
-│   │   └── streaming_llm.py     # StreamingLLM 方法 ⭐
+│   │   ├── streaming_llm.py     # StreamingLLM 方法
+│   │   ├── h2o_l2.py            # H2O-L2 压缩
+│   │   ├── snapkv_lite.py       # SnapKV-Lite 压缩
+│   │   ├── pyramid_kv.py        # Pyramid KV 压缩
+│   │   ├── adaptive_l2.py       # Adaptive L2 压缩
+│   │   └── recent_only.py       # Recent-Only 对照组
 │   ├── evaluate.py              # 统一评估模块
 │   ├── benchmark.py             # 统一基准测试模块
 │   └── utils.py                 # 工具函数
 │
 ├── scripts/                     # 🛠️ 工具脚本
 │   ├── benchmark.py             # 统一基准测试入口 ⭐
-│   └── plot_compression_results.py  # 可视化绘图
+│   └── plot_comprehensive_results.py  # 可视化绘图
 │
 ├── baseline_test.py             # 基线性能测试
 │
 └── results/                     # 📈 结果图表
-    ├── strategy_comparison.png      # 策略对比图
-    ├── keep_ratio_analysis.png      # Keep Ratio 分析图
-    ├── ppl_accuracy_tradeoff.png    # PPL-Accuracy 权衡图
-    ├── improvement_summary.png      # 改进总结图
-    └── compression_comparison.png   # 压缩效果对比图
+    ├── methods_512_comparison.png   # 512 Cache 方法对比
+    ├── methods_1024_comparison.png  # 1024 Cache 方法对比
+    ├── ppl_throughput_tradeoff.png  # PPL-吞吐量权衡图
+    ├── method_summary_heatmap.png   # 方法总结热力图
+    └── cache_efficiency.png         # Cache 效率对比
 ```
 
 ## 环境配置
@@ -82,7 +97,7 @@ conda create -n nlp python=3.11
 conda activate nlp
 
 # 安装依赖
-pip install torch transformers datasets numpy tqdm
+pip install torch transformers datasets numpy tqdm matplotlib
 ```
 
 ### 模型和数据集
@@ -104,7 +119,19 @@ python scripts/benchmark.py --method fix_size_l2 --fix_kv_sizes 256,512 --strate
 # 测试 StreamingLLM
 python scripts/benchmark.py --method streaming_llm --start_size 4 --recent_sizes 252,508,1020
 
-# 对比所有方法
+# 测试 H2O-L2
+python scripts/benchmark.py --method h2o_l2 --heavy_hitter_sizes 32,64,128
+
+# 测试 SnapKV-Lite
+python scripts/benchmark.py --method snapkv_lite --observation_windows 16,32,64
+
+# 测试 Pyramid KV
+python scripts/benchmark.py --method pyramid_kv --base_sizes 256,512
+
+# 测试 Adaptive L2
+python scripts/benchmark.py --method adaptive_l2 --target_sizes 256,512
+
+# 对比所有方法 (512 和 1024 cache size，含对照组)
 python scripts/benchmark.py --compare_all
 ```
 
@@ -115,6 +142,10 @@ from kvcompress import (
     l2_compress, 
     fix_size_l2_compress, 
     streaming_llm_compress,
+    h2o_l2_compress,
+    snapkv_lite_compress,
+    pyramid_kv_compress,
+    adaptive_l2_compress,
     evaluate_with_compression
 )
 
@@ -142,6 +173,14 @@ compressed_kv = streaming_llm_compress(
     recent_size=508,       # 保留最近 508 个 tokens
 )
 
+# 方法4: H2O-L2
+compressed_kv = h2o_l2_compress(
+    past_key_values,
+    start_size=4,          # 4 attention sinks
+    heavy_hitter_size=64,  # 64 heavy hitters
+    recent_size=444,       # 444 recent tokens
+)
+
 # 使用统一评估接口
 results = evaluate_with_compression(
     model, tokenizer, text,
@@ -157,7 +196,8 @@ print(f"PPL: {results['perplexity']:.2f}, Acc: {results['accuracy']:.2%}")
 from kvcompress import get_compress_fn, list_methods
 
 # 查看所有可用方法
-print(list_methods())  # ['l2_compress', 'fix_size_l2', 'streaming_llm']
+print(list_methods())
+# ['l2_compress', 'fix_size_l2', 'streaming_llm', 'h2o_l2', 'snapkv_lite', 'pyramid_kv', 'adaptive_l2', 'recent_only']
 
 # 通过名称获取压缩函数
 compress_fn = get_compress_fn("streaming_llm")
@@ -203,115 +243,192 @@ compressed = compress_fn(past_key_values, start_size=4, recent_size=508)
 4. 拼接: attention sinks + recent tokens
 ```
 
+### h2o_l2_compress (H2O-L2)
+
+H2O-inspired 方法，使用 L2 范数作为 attention 重要性的近似。
+
+```
+输入: KV Cache, start_size, heavy_hitter_size, recent_size
+输出: 最多 (start_size + heavy_hitter_size + recent_size) tokens
+
+Cache 结构: [attention sinks] + [heavy hitters (低L2范数)] + [recent window]
+
+1. 保留 start_size 个初始 tokens (attention sinks)
+2. 从中间区域选择 heavy_hitter_size 个低 L2 范数 tokens
+3. 保留 recent_size 个最近 tokens
+4. 按时间顺序拼接
+```
+
+### snapkv_lite_compress (SnapKV-Lite)
+
+基于观察窗口投票的压缩方法。
+
+```
+输入: KV Cache, observation_window, keep_size
+输出: 最多 keep_size tokens
+
+1. 使用最后 observation_window 个 tokens 作为观察上下文
+2. 计算 prefix tokens 的重要性分数 (L2 norm inverted)
+3. 应用 pooling 平滑重要性分数
+4. 选择 top-k 最重要的 prefix tokens
+5. 拼接: selected prefix + observation window
+```
+
+### pyramid_kv_compress (Pyramid KV)
+
+层级自适应压缩，不同层使用不同的压缩率。
+
+```
+输入: KV Cache, base_size, layer_decay, profile
+输出: 每层不同大小的 KV Cache
+
+Layer i 的 cache size = base_size * (layer_decay ^ i)
+- 低层: 保留更多 tokens (捕获局部模式)
+- 高层: 保留更少 tokens (更冗余)
+```
+
+### adaptive_l2_compress (Adaptive L2)
+
+根据序列长度动态调整压缩策略。
+
+```
+输入: KV Cache, target_size, soft_limit, hard_limit
+输出: 动态大小的 KV Cache
+
+压缩策略:
+- seq_len <= soft_limit: 不压缩
+- soft_limit < seq_len <= hard_limit: 渐进压缩
+- seq_len > hard_limit: 压缩到 target_size
+```
+
+### recent_only_compress (对照组)
+
+纯滑动窗口，仅保留最近的 N 个 tokens。
+
+```
+输入: KV Cache, window_size
+输出: 最多 window_size tokens 的 KV Cache
+
+1. 如果 seq_len <= window_size，不压缩
+2. 保留最近 window_size 个 tokens
+```
+
 ## 实验结果
 
-### Pythia-2.8B 基准测试结果
+### Pythia-2.8B 综合基准测试
 
 **测试配置**:
 - 模型: `EleutherAI/pythia-2.8b`
 - 数据集: PG-19 长文本
 - 评估 tokens: 2000
 - 设备: CUDA GPU
+- Cache Size: 512 和 1024
 
-#### 详细性能数据
+### 512 Cache Size 对比
 
-| 方法 | TTFT(s) | TPOT(s) | 吞吐量(tok/s) | PPL | Accuracy | Cache Size |
-|------|---------|---------|---------------|-----|----------|------------|
-| **Baseline** | 0.0247 | 0.0119 | 82.97 | 15.48 | 47.77% | 1999 |
-| L2 (kr=0.8) | 0.0085 | 0.0085 | 114.70 | 57.83 | 30.72% | 99 |
-| L2 (kr=0.5) | 0.0084 | 0.0084 | 115.93 | 43.74 | 35.29% | 99 |
-| Fix-512 (keep_low) | 0.0083 | 0.0124 | 79.46 | 17.66 | 46.40% | 512 |
-| **StreamingLLM-512** | 0.0084 | 0.0106 | 92.97 | 15.92 | 47.57% | 512 |
-| **StreamingLLM-1024** | 0.0123 | 0.0117 | 84.26 | 15.52 | 47.72% | 1024 |
+| 方法 | TTFT(s) | TPOT(s) | 吞吐量 | PPL | Accuracy | KV Cache Size |
+|------|---------|---------|--------|-----|----------|---------------|
+| **Baseline** | 0.0251 | 0.0122 | 81.36 | 15.48 | 47.77% | 1999 |
+| Recent-Only 512 | 0.0085 | 0.0098 | 99.95 | 32.75 | 39.27% | 512 |
+| **StreamingLLM 512** | 0.0084 | 0.0102 | 96.73 | 15.92 | 47.57% | 512 |
+| **H2O-L2 512** | 0.0086 | 0.0116 | 84.53 | 15.78 | 47.57% | 512 |
+| SnapKV-Lite 512 | 0.0086 | 0.0127 | 77.58 | 19.08 | 45.52% | 512 |
+| Pyramid KV 512 | 0.0085 | 0.0111 | 88.71 | 17.37 | 46.30% | ~414 |
+| Adaptive L2 512 | 0.0084 | 0.0125 | 79.15 | 19.82 | 45.25% | ~256 |
+| Fix-Size L2 512 | 0.0086 | 0.0123 | 79.95 | 17.66 | 46.40% | 512 |
 
-#### 与 Baseline 对比
+![512 Cache Comparison](results/methods_512_comparison.png)
 
-| 方法 | 吞吐量变化 | TPOT 提升 | PPL 变化 | Accuracy 变化 |
-|------|-----------|----------|---------|--------------|
-| L2 (kr=0.8) | +38.2% | +28.3% | +273.5% ❌ | -35.7% ❌ |
-| L2 (kr=0.5) | +39.7% | +29.1% | +182.5% ❌ | -26.1% ❌ |
-| Fix-512 (keep_low) | -4.2% | -4.2% | +14.1% | -2.9% |
-| **StreamingLLM-512** | **+12.1%** | **+11.2%** | **+2.8%** | **-0.4%** ✅ |
-| **StreamingLLM-1024** | +1.6% | +1.8% | **+0.3%** | **-0.1%** ✅ |
+### 1024 Cache Size 对比
+
+| 方法 | TTFT(s) | TPOT(s) | 吞吐量 | PPL | Accuracy | KV Cache Size |
+|------|---------|---------|--------|-----|----------|---------------|
+| **Baseline** | 0.0251 | 0.0122 | 81.36 | 15.48 | 47.77% | 1999 |
+| Recent-Only 1024 | 0.0085 | 0.0110 | 89.47 | 20.91 | 43.67% | 1024 |
+| **StreamingLLM 1024** | 0.0088 | 0.0115 | 85.38 | 15.52 | 47.72% | 1024 |
+| **H2O-L2 1024** | 0.0084 | 0.0128 | 77.24 | 15.53 | 47.82% | 1024 |
+| SnapKV-Lite 1024 | 0.0085 | 0.0136 | 72.71 | 16.23 | 47.27% | 1024 |
+| Pyramid KV 1024 | 0.0085 | 0.0113 | 87.06 | 16.40 | 47.17% | ~829 |
+| Adaptive L2 1024 | 0.0084 | 0.0124 | 79.35 | 17.73 | 46.22% | ~512 |
+| Fix-Size L2 1024 | 0.0084 | 0.0130 | 75.55 | 16.17 | 46.80% | 1024 |
+
+![1024 Cache Comparison](results/methods_1024_comparison.png)
+
+### 与 Baseline 对比
+
+#### 512 Cache Size
+
+| 方法 | 吞吐量变化 | TPOT 提升 | PPL 变化 | Accuracy 变化 | 评价 |
+|------|-----------|----------|---------|--------------|------|
+| Recent-Only 512 | +22.8% | +19.4% | +111.5% ❌ | -17.8% ❌ | 对照组 |
+| **StreamingLLM 512** | **+18.9%** | **+16.7%** | **+2.8%** | **-0.4%** | 🏆 最佳综合 |
+| **H2O-L2 512** | +3.9% | +4.4% | **+1.9%** | **-0.4%** | ✅ 质量最佳 |
+| SnapKV-Lite 512 | -4.7% | -4.2% | +23.2% | -4.7% | 需优化 |
+| Pyramid KV 512 | +9.0% | +9.1% | +12.2% | -3.1% | 层级优化 |
+| Adaptive L2 512 | -2.7% | -2.6% | +28.0% | -5.3% | 动态压缩 |
+| Fix-Size L2 512 | -1.7% | -1.1% | +14.1% | -2.9% | 固定大小 |
+
+#### 1024 Cache Size
+
+| 方法 | 吞吐量变化 | TPOT 提升 | PPL 变化 | Accuracy 变化 | 评价 |
+|------|-----------|----------|---------|--------------|------|
+| Recent-Only 1024 | +10.0% | +9.8% | +35.1% ❌ | -8.6% ❌ | 对照组 |
+| **StreamingLLM 1024** | +4.9% | +5.4% | **+0.3%** | **-0.1%** | 🏆 质量最佳 |
+| **H2O-L2 1024** | -5.1% | -4.7% | **+0.3%** | **+0.1%** | ✅ 质量最佳 |
+| SnapKV-Lite 1024 | -10.6% | -11.3% | +4.8% | -1.0% | 上下文感知 |
+| Pyramid KV 1024 | +7.0% | +7.3% | +5.9% | -1.3% | 层级优化 |
+| Adaptive L2 1024 | -2.5% | -1.9% | +14.5% | -3.2% | 动态压缩 |
+| Fix-Size L2 1024 | -7.1% | -7.1% | +4.4% | -2.0% | 固定大小 |
+
+### 可视化分析
+
+#### 方法性能总结热力图
+
+![Method Summary Heatmap](results/method_summary_heatmap.png)
+
+#### PPL vs 吞吐量权衡
+
+![PPL Throughput Tradeoff](results/ppl_throughput_tradeoff.png)
+
+#### Cache 效率对比
+
+![Cache Efficiency](results/cache_efficiency.png)
 
 ### 关键发现
 
 🏆 **最佳方法: StreamingLLM**
-- **StreamingLLM-512**: 吞吐量提升 12.1%，PPL 仅增加 2.8%，Accuracy 几乎无损失
+- **StreamingLLM-512**: 吞吐量提升 18.9%，PPL 仅增加 2.8%，Accuracy 几乎无损失 (-0.4%)
 - **StreamingLLM-1024**: 质量几乎与 Baseline 相同，PPL 仅增加 0.3%
 
-⚠️ **L2 压缩注意事项**:
-- L2 压缩在极高压缩率下会导致严重的质量下降
-- 适合对质量要求不高但需要极致速度的场景
+✅ **H2O-L2 表现突出**:
+- **H2O-L2-512**: PPL 仅增加 1.9%（512 方法中最低）
+- **H2O-L2-1024**: PPL 仅增加 0.3%，Accuracy 甚至略有提升 (+0.1%)
+- 通过保留 attention sinks + heavy hitters + recent tokens 实现更好的信息保留
 
-### 可视化结果
+⚠️ **Recent-Only 对照组**:
+- **Recent-Only-512**: PPL 增加 111.5%，Accuracy 下降 17.8%
+- **Recent-Only-1024**: PPL 增加 35.1%，Accuracy 下降 8.6%
+- 说明保留 attention sinks 的重要性
 
-运行绘图脚本生成可视化图表：
-```bash
-python scripts/plot_benchmark_results.py
-```
-
-#### 方法总览对比
-
-![Compare All Methods](results/compare_all_methods.png)
-
-#### StreamingLLM 详细测试
-
-StreamingLLM 通过保留 attention sinks（初始 4 tokens）+ 滑动窗口（最近 tokens），在显著减少 cache 大小的同时保持接近 baseline 的质量。
-
-![StreamingLLM Benchmark](results/streaming_llm_benchmark.png)
-
-**StreamingLLM 详细数据**:
-
-| 方法 | TTFT(s) | TPOT(s) | 吞吐量 | PPL | Accuracy | Cache |
-|------|---------|---------|--------|-----|----------|-------|
-| Baseline | 0.0244 | 0.0117 | 83.97 | 15.48 | 47.77% | 1999 |
-| Recent-Only 256 | 0.0086 | 0.0092 | 106.82 | 48.68 | 35.49% | 256 |
-| Recent-Only 512 | 0.0085 | 0.0099 | 99.28 | 32.75 | 39.27% | 512 |
-| Recent-Only 1024 | 0.0085 | 0.0111 | 88.76 | 20.91 | 43.67% | 1024 |
-| **Streaming 256** | 0.0085 | 0.0096 | 102.49 | 16.61 | 47.07% | 256 |
-| **Streaming 512** | 0.0084 | 0.0102 | 96.06 | 15.92 | 47.57% | 512 |
-| **Streaming 1024** | 0.0085 | 0.0116 | 84.69 | 15.52 | 47.72% | 1024 |
-
-💡 **关键发现**: StreamingLLM 相比 Recent-Only（纯滑动窗口）在相同 cache 大小下 PPL 降低 60-70%！
-
-#### Fix-Size L2 详细测试
-
-Fix-Size L2 压缩通过 L2 范数选择性保留重要 token，在固定 cache 大小约束下优于纯滑动窗口。
-
-![Fix-Size L2 Benchmark](results/fix_size_l2_benchmark.png)
-
-**Fix-Size L2 详细数据**:
-
-| 方法 | TTFT(s) | TPOT(s) | 吞吐量 | PPL | Accuracy | Cache |
-|------|---------|---------|--------|-----|----------|-------|
-| Baseline | 0.0165 | 0.0109 | 90.10 | 15.48 | 47.77% | 1999 |
-| Recent-Only 256 | 0.0085 | 0.0091 | 107.29 | 48.68 | 35.49% | 256 |
-| Recent-Only 512 | 0.0085 | 0.0098 | 99.71 | 32.75 | 39.27% | 512 |
-| Fix256 kr=0.8 | 0.0086 | 0.0113 | 87.16 | 20.47 | 44.15% | 256 |
-| Fix256 kr=0.5 | 0.0086 | 0.0113 | 87.32 | 19.86 | 44.82% | 256 |
-| **Fix256 kr=0.3** | 0.0086 | 0.0115 | 85.27 | **19.76** | 45.05% | 256 |
-| Fix512 kr=0.8 | 0.0085 | 0.0116 | 84.73 | 17.96 | 46.08% | 512 |
-| **Fix512 kr=0.5** | 0.0085 | 0.0123 | 79.81 | **17.66** | 46.40% | 512 |
-| Fix512 kr=0.3 | 0.0086 | 0.0124 | 79.51 | 17.83 | 46.10% | 512 |
-
-💡 **关键发现**: Fix-Size L2 相比 Recent-Only PPL 降低约 40-60%，但不如 StreamingLLM 效果好。
-
-#### 性能权衡分析
-
-![Tradeoff Analysis](results/tradeoff_analysis.png)
+📊 **其他方法分析**:
+- **Pyramid KV**: 吞吐量提升 7-9%，PPL 增加 6-12%，适合层级优化
+- **SnapKV-Lite**: 1024 配置下质量较好 (PPL +4.8%)，但吞吐量下降
+- **Adaptive L2**: 动态压缩，适合变长输入场景
 
 ## 参考文献
 
 - **KnormPress**: [A Simple and Effective L2 Norm-Based Strategy for KV Cache Compression](https://arxiv.org/abs/2406.11430) (EMNLP 2024)
 - **StreamingLLM**: [Efficient Streaming Language Models with Attention Sinks](https://arxiv.org/abs/2309.17453) (ICLR 2024)
-- **Pythia 模型**: [EleutherAI/pythia-70m-deduped](https://huggingface.co/EleutherAI/pythia-70m-deduped)
+- **H2O**: [Heavy-Hitter Oracle for Efficient Generative Inference of Large Language Models](https://arxiv.org/abs/2306.14048) (NeurIPS 2023)
+- **SnapKV**: [LLM Knows What You are Looking for Before Generation](https://arxiv.org/abs/2404.14469) (2024)
+- **PyramidKV**: [Dynamic KV Cache Compression based on Pyramidal Information Funneling](https://arxiv.org/abs/2406.02069) (2024)
+- **Pythia 模型**: [EleutherAI/pythia-2.8b](https://huggingface.co/EleutherAI/pythia-2.8b)
 
 ## 总结
 
 本项目实现了统一的 KV Cache 压缩库 `kvcompress`：
 
-✅ **多种压缩方法**: l2_compress, fix_size_l2, streaming_llm  
+✅ **8 种压缩方法**: l2_compress, fix_size_l2, streaming_llm, h2o_l2, snapkv_lite, pyramid_kv, adaptive_l2, recent_only  
 ✅ **统一接口**: 所有方法使用相同的函数签名  
 ✅ **方法注册表**: 方便扩展新方法  
 ✅ **统一评估**: 支持 PPL, Accuracy, TTFT, TPOT  
@@ -321,11 +438,13 @@ Fix-Size L2 压缩通过 L2 范数选择性保留重要 token，在固定 cache 
 
 基于 Pythia-2.8B 模型的测试结果：
 
-| 推荐场景 | 推荐方法 | 效果 |
-|---------|---------|------|
-| 质量优先 | StreamingLLM-1024 | PPL +0.3%, Acc -0.1% |
-| 平衡方案 | StreamingLLM-512 | 吞吐量 +12%, PPL +2.8% |
-| 速度优先 | L2 (kr=0.5) | 吞吐量 +40%, 但质量下降明显 |
+| 推荐场景 | 推荐方法 | Cache Size | 效果 |
+|---------|---------|------------|------|
+| 质量优先 | StreamingLLM-1024 / H2O-L2-1024 | 1024 | PPL +0.3%, Acc -0.1% |
+| 平衡方案 | StreamingLLM-512 | 512 | 吞吐量 +18.9%, PPL +2.8% |
+| 质量备选 | H2O-L2-512 | 512 | PPL +1.9%, Acc -0.4% |
+| 层级优化 | Pyramid KV | 414~829 | 吞吐量 +7~9%, PPL +6~12% |
+| 变长输入 | Adaptive L2 | 动态 | 根据输入长度自动调整 |
 
 ## 作者
 
@@ -333,4 +452,4 @@ Jiamin Liu
 
 ## 致谢
 
-感谢 KnormPress 和 StreamingLLM 论文作者提供的开源实现和详细文档。
+感谢 KnormPress、StreamingLLM、H2O、SnapKV、PyramidKV 论文作者提供的开源实现和详细文档。

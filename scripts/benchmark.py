@@ -14,13 +14,32 @@ Usage Examples:
     # Test StreamingLLM
     python scripts/benchmark.py --method streaming_llm --start_size 4 --recent_sizes 252,508,1020
 
+    # Test H2O-L2
+    python scripts/benchmark.py --method h2o_l2 --heavy_hitter_sizes 32,64,128
+
+    # Test SnapKV-Lite
+    python scripts/benchmark.py --method snapkv_lite --observation_windows 16,32,64
+
+    # Test Pyramid KV
+    python scripts/benchmark.py --method pyramid_kv --base_sizes 256,512
+
+    # Test Adaptive L2
+    python scripts/benchmark.py --method adaptive_l2 --target_sizes 256,512
+
     # Compare all methods
     python scripts/benchmark.py --compare_all
+
+    # Compare new methods only
+    python scripts/benchmark.py --compare_new
 
 Supported Methods:
     - l2_compress: KnormPress ratio-based compression
     - fix_size_l2: Fixed-size KV cache with L2-based eviction
     - streaming_llm: StreamingLLM with attention sinks
+    - h2o_l2: H2O-inspired with L2 norm approximation
+    - snapkv_lite: SnapKV-inspired observation window voting
+    - pyramid_kv: Layer-wise adaptive compression
+    - adaptive_l2: Dynamic sequence-length aware compression
 """
 
 import os
@@ -35,7 +54,11 @@ from datasets import load_dataset
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, project_root)
 
-from kvcompress.methods import get_compress_fn, list_methods, l2_compress, fix_size_l2_compress, streaming_llm_compress, recent_only_compress
+from kvcompress.methods import (
+    get_compress_fn, list_methods,
+    l2_compress, fix_size_l2_compress, streaming_llm_compress, recent_only_compress,
+    h2o_l2_compress, snapkv_lite_compress, pyramid_kv_compress, adaptive_l2_compress
+)
 from kvcompress.benchmark import benchmark, run_benchmark_suite, print_benchmark_summary
 from kvcompress.evaluate import evaluate_with_compression
 
@@ -290,33 +313,200 @@ def build_methods_config(args) -> list:
                 }
             })
     
+    elif args.method == "h2o_l2":
+        # H2O-L2 with different heavy hitter sizes
+        heavy_hitter_sizes = [int(x) for x in args.heavy_hitter_sizes.split(",")]
+        
+        # Add recent_only control group if not disabled
+        if not args.no_recent_only:
+            for hh_size in heavy_hitter_sizes:
+                total_size = args.start_size + hh_size + args.h2o_recent_size
+                methods.append({
+                    "name": f"recent_only_{total_size}",
+                    "compress_fn": recent_only_compress,
+                    "kwargs": {
+                        "window_size": total_size,
+                    }
+                })
+        
+        for hh_size in heavy_hitter_sizes:
+            total_size = args.start_size + hh_size + args.h2o_recent_size
+            methods.append({
+                "name": f"h2o_l2_{total_size}",
+                "compress_fn": h2o_l2_compress,
+                "kwargs": {
+                    "start_size": args.start_size,
+                    "heavy_hitter_size": hh_size,
+                    "recent_size": args.h2o_recent_size,
+                }
+            })
+    
+    elif args.method == "snapkv_lite":
+        # SnapKV-Lite with different observation windows
+        observation_windows = [int(x) for x in args.observation_windows.split(",")]
+        keep_sizes = [int(x) for x in args.snapkv_keep_sizes.split(",")]
+        
+        for keep_size in keep_sizes:
+            # Add recent_only control group if not disabled
+            if not args.no_recent_only:
+                methods.append({
+                    "name": f"recent_only_{keep_size}",
+                    "compress_fn": recent_only_compress,
+                    "kwargs": {
+                        "window_size": keep_size,
+                    }
+                })
+            
+            for obs_win in observation_windows:
+                methods.append({
+                    "name": f"snapkv_{keep_size}_obs{obs_win}",
+                    "compress_fn": snapkv_lite_compress,
+                    "kwargs": {
+                        "observation_window": obs_win,
+                        "keep_size": keep_size,
+                    }
+                })
+    
+    elif args.method == "pyramid_kv":
+        # Pyramid KV with different base sizes
+        base_sizes = [int(x) for x in args.base_sizes.split(",")]
+        
+        for base_size in base_sizes:
+            # Add recent_only control group if not disabled
+            if not args.no_recent_only:
+                methods.append({
+                    "name": f"recent_only_{base_size}",
+                    "compress_fn": recent_only_compress,
+                    "kwargs": {
+                        "window_size": base_size,
+                    }
+                })
+            
+            methods.append({
+                "name": f"pyramid_{base_size}",
+                "compress_fn": pyramid_kv_compress,
+                "kwargs": {
+                    "base_size": base_size,
+                    "layer_decay": args.layer_decay,
+                    "min_size": args.min_size,
+                    "profile": args.pyramid_profile,
+                }
+            })
+    
+    elif args.method == "adaptive_l2":
+        # Adaptive L2 with different target sizes
+        target_sizes = [int(x) for x in args.target_sizes.split(",")]
+        
+        for target_size in target_sizes:
+            # Add recent_only control group if not disabled
+            if not args.no_recent_only:
+                methods.append({
+                    "name": f"recent_only_{target_size}",
+                    "compress_fn": recent_only_compress,
+                    "kwargs": {
+                        "window_size": target_size,
+                    }
+                })
+            
+            methods.append({
+                "name": f"adaptive_{target_size}",
+                "compress_fn": adaptive_l2_compress,
+                "kwargs": {
+                    "target_size": target_size,
+                    "soft_limit": args.soft_limit,
+                    "hard_limit": args.hard_limit,
+                }
+            })
+    
     elif args.compare_all:
-        # Compare all methods with default configurations
+        # Comprehensive comparison: all methods at 512 and 1024 cache sizes with control groups
         methods.extend([
+            # ========== 512 Cache Size ==========
+            # Control group: Recent-Only 512
             {
-                "name": "l2_kr=0.8",
-                "compress_fn": l2_compress,
-                "kwargs": {"keep_ratio": 0.8, "prune_after": args.prune_after}
+                "name": "recent_only_512",
+                "compress_fn": recent_only_compress,
+                "kwargs": {"window_size": 512}
             },
-            {
-                "name": "l2_kr=0.5",
-                "compress_fn": l2_compress,
-                "kwargs": {"keep_ratio": 0.5, "prune_after": args.prune_after}
-            },
-            {
-                "name": "fix512_keep_low",
-                "compress_fn": fix_size_l2_compress,
-                "kwargs": {"fix_kv_size": 512, "strategy": "keep_low", "keep_ratio": 0.5}
-            },
+            # StreamingLLM 512
             {
                 "name": "streaming_512",
                 "compress_fn": streaming_llm_compress,
                 "kwargs": {"start_size": 4, "recent_size": 508}
             },
+            # H2O-L2 512
+            {
+                "name": "h2o_l2_512",
+                "compress_fn": h2o_l2_compress,
+                "kwargs": {"start_size": 4, "heavy_hitter_size": 64, "recent_size": 444}
+            },
+            # SnapKV-Lite 512
+            {
+                "name": "snapkv_512",
+                "compress_fn": snapkv_lite_compress,
+                "kwargs": {"observation_window": 32, "keep_size": 512}
+            },
+            # Pyramid KV 512
+            {
+                "name": "pyramid_512",
+                "compress_fn": pyramid_kv_compress,
+                "kwargs": {"base_size": 512, "layer_decay": 0.9, "min_size": 64}
+            },
+            # Adaptive L2 512
+            {
+                "name": "adaptive_512",
+                "compress_fn": adaptive_l2_compress,
+                "kwargs": {"target_size": 512, "soft_limit": 256, "hard_limit": 1024}
+            },
+            # Fix-Size L2 512
+            {
+                "name": "fix_l2_512",
+                "compress_fn": fix_size_l2_compress,
+                "kwargs": {"fix_kv_size": 512, "strategy": "keep_low", "keep_ratio": 0.5}
+            },
+            
+            # ========== 1024 Cache Size ==========
+            # Control group: Recent-Only 1024
+            {
+                "name": "recent_only_1024",
+                "compress_fn": recent_only_compress,
+                "kwargs": {"window_size": 1024}
+            },
+            # StreamingLLM 1024
             {
                 "name": "streaming_1024",
                 "compress_fn": streaming_llm_compress,
                 "kwargs": {"start_size": 4, "recent_size": 1020}
+            },
+            # H2O-L2 1024
+            {
+                "name": "h2o_l2_1024",
+                "compress_fn": h2o_l2_compress,
+                "kwargs": {"start_size": 4, "heavy_hitter_size": 128, "recent_size": 892}
+            },
+            # SnapKV-Lite 1024
+            {
+                "name": "snapkv_1024",
+                "compress_fn": snapkv_lite_compress,
+                "kwargs": {"observation_window": 64, "keep_size": 1024}
+            },
+            # Pyramid KV 1024
+            {
+                "name": "pyramid_1024",
+                "compress_fn": pyramid_kv_compress,
+                "kwargs": {"base_size": 1024, "layer_decay": 0.9, "min_size": 128}
+            },
+            # Adaptive L2 1024
+            {
+                "name": "adaptive_1024",
+                "compress_fn": adaptive_l2_compress,
+                "kwargs": {"target_size": 1024, "soft_limit": 512, "hard_limit": 2048}
+            },
+            # Fix-Size L2 1024
+            {
+                "name": "fix_l2_1024",
+                "compress_fn": fix_size_l2_compress,
+                "kwargs": {"fix_kv_size": 1024, "strategy": "keep_low", "keep_ratio": 0.5}
             },
         ])
     
@@ -338,14 +528,27 @@ Examples:
   # StreamingLLM
   python scripts/benchmark.py --method streaming_llm --start_size 4 --recent_sizes 252,508
 
+  # H2O-L2 (NEW)
+  python scripts/benchmark.py --method h2o_l2 --heavy_hitter_sizes 32,64,128
+
+  # SnapKV-Lite (NEW)
+  python scripts/benchmark.py --method snapkv_lite --observation_windows 16,32,64
+
+  # Pyramid KV (NEW)
+  python scripts/benchmark.py --method pyramid_kv --base_sizes 256,512
+
+  # Adaptive L2 (NEW)
+  python scripts/benchmark.py --method adaptive_l2 --target_sizes 256,512
+
   # Compare all methods
   python scripts/benchmark.py --compare_all
+
+  # Compare new methods only
+  python scripts/benchmark.py --compare_new
         """
     )
     
     # General arguments
-    # EleutherAI/pythia-6.9b
-    # EleutherAI/pythia-70m-deduped
     parser.add_argument("--model_id", type=str, default="EleutherAI/pythia-2.8b",
                        help="Model ID from HuggingFace")
     parser.add_argument("--num_samples", type=int, default=2,
@@ -364,10 +567,14 @@ Examples:
                        help="Number of warmup iterations before benchmark (default: 3)")
     
     # Method selection
-    parser.add_argument("--method", type=str, choices=["l2_compress", "fix_size_l2", "streaming_llm"],
+    parser.add_argument("--method", type=str, 
+                       choices=["l2_compress", "fix_size_l2", "streaming_llm", 
+                               "h2o_l2", "snapkv_lite", "pyramid_kv", "adaptive_l2"],
                        help="Compression method to benchmark")
     parser.add_argument("--compare_all", action="store_true",
-                       help="Compare all methods with default configurations")
+                       help="Compare all original methods with default configurations")
+    parser.add_argument("--compare_new", action="store_true",
+                       help="Compare new methods (H2O-L2, SnapKV-Lite, Pyramid, Adaptive)")
     
     # L2 compress arguments
     parser.add_argument("--keep_ratios", type=str, default="0.8,0.5,0.3",
@@ -383,15 +590,46 @@ Examples:
     
     # StreamingLLM arguments
     parser.add_argument("--start_size", type=int, default=4,
-                       help="Number of initial tokens (attention sinks) for StreamingLLM")
+                       help="Number of initial tokens (attention sinks)")
     parser.add_argument("--recent_sizes", type=str, default="252,508,1020",
                        help="Comma-separated recent_size values for StreamingLLM")
+    
+    # H2O-L2 arguments
+    parser.add_argument("--heavy_hitter_sizes", type=str, default="32,64,128",
+                       help="Comma-separated heavy_hitter_size values for H2O-L2")
+    parser.add_argument("--h2o_recent_size", type=int, default=444,
+                       help="Recent window size for H2O-L2 (default: 444)")
+    
+    # SnapKV-Lite arguments
+    parser.add_argument("--observation_windows", type=str, default="16,32,64",
+                       help="Comma-separated observation_window values for SnapKV-Lite")
+    parser.add_argument("--snapkv_keep_sizes", type=str, default="512",
+                       help="Comma-separated keep_size values for SnapKV-Lite")
+    
+    # Pyramid KV arguments
+    parser.add_argument("--base_sizes", type=str, default="256,512",
+                       help="Comma-separated base_size values for Pyramid KV")
+    parser.add_argument("--layer_decay", type=float, default=0.9,
+                       help="Layer decay factor for Pyramid KV (default: 0.9)")
+    parser.add_argument("--min_size", type=int, default=64,
+                       help="Minimum cache size for any layer in Pyramid KV (default: 64)")
+    parser.add_argument("--pyramid_profile", type=str, default="exponential",
+                       choices=["exponential", "linear", "constant"],
+                       help="Pyramid profile: exponential, linear, or constant")
+    
+    # Adaptive L2 arguments
+    parser.add_argument("--target_sizes", type=str, default="256,512",
+                       help="Comma-separated target_size values for Adaptive L2")
+    parser.add_argument("--soft_limit", type=int, default=256,
+                       help="Soft limit (no compression below this) for Adaptive L2")
+    parser.add_argument("--hard_limit", type=int, default=1024,
+                       help="Hard limit (max compression above this) for Adaptive L2")
     
     args = parser.parse_args()
     
     # Validate arguments
-    if not args.method and not args.compare_all:
-        parser.error("Must specify --method or --compare_all")
+    if not args.method and not args.compare_all and not args.compare_new:
+        parser.error("Must specify --method, --compare_all, or --compare_new")
     
     # Parse skip_layers
     skip_layers = [int(x) for x in args.skip_layers.split(",")]
@@ -401,14 +639,13 @@ Examples:
     print("="*70)
     print(f"\nConfiguration:")
     print(f"  Model: {args.model_id}")
-    print(f"  Method: {args.method or 'compare_all'}")
+    print(f"  Method: {args.method or ('compare_all' if args.compare_all else 'compare_new')}")
     print(f"  Skip layers: {skip_layers}")
     print(f"  Number of samples: {args.num_samples}")
     print(f"  Max eval tokens: {args.max_tokens}")
     print(f"  Max new tokens: {args.max_new_tokens}")
     print(f"  Warmup iterations: {args.num_warmup}")
     
-    # args.model_id = "EleutherAI/pythia-6.9b"
     # Load model
     model, tokenizer, device = load_model_and_tokenizer(args.model_id)
     
@@ -521,4 +758,3 @@ Examples:
 
 if __name__ == "__main__":
     main()
-
