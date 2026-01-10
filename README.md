@@ -28,18 +28,6 @@ KVCompress 是一个统一的 KV Cache 压缩库，支持多种压缩策略：
 | `adaptive_l2_compress` | 根据序列长度动态调整压缩率 | 变长输入场景 |
 | `recent_only_compress` | 纯滑动窗口，保留最近 N 个 tokens | 对照组基线 |
 
-### StreamingLLM 方法
-
-StreamingLLM 是来自 MIT Han Lab 的方法（ICLR 2024），核心发现是：
-
-- LLM 会将大量 attention 分配给初始 tokens（"attention sinks"），即使它们语义上不重要
-- 通过保留这些 attention sinks + 滑动窗口的最近 tokens，可以处理无限长度的输入
-
-```
-Cache 结构: [initial tokens (0:start_size)] + [recent tokens (seq_len-recent_size:seq_len)]
-默认配置: 4 initial tokens + 508 recent tokens = 512 total
-```
-
 ## 项目结构
 
 ```
