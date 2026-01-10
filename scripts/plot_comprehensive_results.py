@@ -248,9 +248,9 @@ def plot_method_summary():
     
     # Set labels
     ax.set_xticks([0, 1, 2])
-    ax.set_xticklabels(['Throughput %', 'PPL % (↓ better)', 'Accuracy %'])
+    ax.set_xticklabels(['Throughput %', 'PPL % (↓ better)', 'Accuracy %'], fontsize=10)
     ax.set_yticks(range(len(labels)))
-    ax.set_yticklabels(labels)
+    ax.set_yticklabels(labels, fontsize=9)  # Reduced font size for y labels
     
     # Add text annotations
     for i in range(len(labels)):
@@ -266,16 +266,23 @@ def plot_method_summary():
     
     # Add colorbar
     cbar = plt.colorbar(im, ax=ax, shrink=0.8)
-    cbar.set_label('Change from Baseline (%)')
+    cbar.set_label('Change from Baseline (%)', fontsize=10)
     
-    ax.set_title('Method Performance Summary vs Baseline\n(Green = Better for Throughput/Acc, Red = Better for PPL)')
+    ax.set_title('Method Performance Summary vs Baseline\n(Green = Better for Throughput/Acc, Red = Better for PPL)', 
+                fontsize=12, pad=15)
     
     # Add separating line between 512 and 1024
     ax.axhline(y=6.5, color='black', linewidth=2)
-    ax.text(-0.7, 3, '512\nCache', ha='center', va='center', fontsize=10, fontweight='bold')
-    ax.text(-0.7, 10, '1024\nCache', ha='center', va='center', fontsize=10, fontweight='bold')
     
-    plt.tight_layout()
+    # Add cache size labels with adjusted position to avoid overlap
+    # Place them further left and with smaller font
+    ax.text(-0.95, 3, '512\nCache', ha='center', va='center', fontsize=9, fontweight='bold',
+           bbox=dict(boxstyle='round,pad=0.3', facecolor='lightblue', alpha=0.5))
+    ax.text(-0.95, 10, '1024\nCache', ha='center', va='center', fontsize=9, fontweight='bold',
+           bbox=dict(boxstyle='round,pad=0.3', facecolor='lightgreen', alpha=0.5))
+    
+    # Adjust subplot to make room for labels on the left
+    plt.subplots_adjust(left=0.18, right=0.95, top=0.93, bottom=0.08)
     plt.savefig('results/method_summary_heatmap.png', dpi=150, bbox_inches='tight')
     print("Saved: results/method_summary_heatmap.png")
     plt.close()
