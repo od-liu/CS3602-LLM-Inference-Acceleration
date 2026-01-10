@@ -431,7 +431,7 @@ Layer i 的 cache size = base_size * (layer_decay ^ i)
 | 质量优先 | StreamingLLM-1024 / H2O-L2-1024 | 1024 | PPL +0.3%, Acc -0.1% |
 | 平衡方案 | StreamingLLM-512 | 512 | 吞吐量 +18.9%, PPL +2.8% |
 | 质量备选 | H2O-L2-512 | 512 | PPL +1.9%, Acc -0.4% |
-| 层级优化 | Pyramid KV | 414~829 | 吞吐量 +7~9%, PPL +6~12% |
+| 层级优化 | Pyramid KV | 414~829 | 吞吐量 +7\~9%, PPL +6\~12% |
 | 变长输入 | Adaptive L2 | 动态 | 根据输入长度自动调整 |
 
 ## 作者
